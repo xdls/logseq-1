@@ -6,7 +6,8 @@
             [clojure.string :as string]
             [frontend.db :as db]
             [cljs-time.core :as t]
-            [frontend.util :as util]))
+            [frontend.util :as util]
+            [frontend.db.query-custom :as custom-query]))
 
 ;; Query fields:
 
@@ -33,13 +34,14 @@
 
 (defn query-wrapper
   [where]
-  (let [q '[:find (pull ?b [*])
-            :where]
-        result (if (coll? (first where))
-                 (apply conj q where)
-                 (conj q where))]
-    (prn "Datascript query: " result)
-    result))
+  (when where
+    (let [q '[:find (pull ?b [*])
+              :where]
+          result (if (coll? (first where))
+                   (apply conj q where)
+                   (conj q where))]
+      (prn "Datascript query: " result)
+      result)))
 
 ;; (between -7d +7d)
 (defn- ->date-int [input]
@@ -169,6 +171,11 @@
               result))))
       (catch js/Error e
         (log/error :query-dsl/parse-error e)))))
+
+(defn query
+  [s]
+  (let [query (query-wrapper (parse s))]
+    (custom-query/simple-custom-query query s)))
 
 (comment
   (require '[frontend.db :as db])

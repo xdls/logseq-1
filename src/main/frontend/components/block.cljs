@@ -7,6 +7,7 @@
             [rum.core :as rum]
             [frontend.state :as state]
             [frontend.db :as db]
+            [frontend.db.query-dsl :as query-dsl]
             [dommy.core :as d]
             [datascript.core :as dc]
             [goog.dom :as gdom]
@@ -408,6 +409,85 @@
     [:span.warning {:title (str "Unsupported macro name: " name)}
      (macro->text name arguments)]))
 
+(declare ->hiccup)
+
+(defn built-in-custom-query?
+  [title]
+  (contains? #{"🔨 NOW" "📅 NEXT"}
+             title))
+
+(rum/defcs custom-query < rum/reactive
+  {:will-mount (fn [state]
+                 (let [[config query] (:rum/args state)
+                       query-atom (if (:dsl-query? config)
+                                    (query-dsl/query (str (:query query)))
+                                    (db/custom-query query))]
+                   (assoc state :query-atom query-atom)))
+   :did-mount (fn [state]
+                (when-let [query (last (:rum/args state))]
+                  (state/add-custom-query-component! query (:rum/react-component state)))
+                state)
+   :will-unmount (fn [state]
+                   (when-let [query (last (:rum/args state))]
+                     (state/remove-custom-query-component! query)
+                     (db/remove-custom-query! (state/get-current-repo) query))
+                   state)}
+  [state config {:keys [title query inputs view collapsed? children?] :as q}]
+  (let [query-atom (:query-atom state)]
+    (let [current-block-uuid (or (:block/uuid (:block config))
+                                 (:block/uuid config))
+          ;; exclude the current one, otherwise it'll loop forever
+          remove-blocks (if current-block-uuid [current-block-uuid] nil)
+          query-result (and query-atom (rum/react query-atom))
+          result (if query-result
+                   (db/custom-query-result-transform query-result remove-blocks q))
+          view-f (sci/eval-string (pr-str view))
+          only-blocks? (:block/uuid (first result))
+          blocks-grouped-by-page? (and (seq result)
+                                       (coll? (first result))
+                                       (:page/name (ffirst result))
+                                       (:block/uuid (first (second (first result))))
+                                       true)
+          built-in? (built-in-custom-query? title)]
+      [:div.custom-query.mt-2 (get config :attr {})
+       (when-not (and built-in? (empty? result))
+         (ui/foldable
+          [:div.opacity-70
+           title]
+          (cond
+            (and (seq result) view-f)
+            (let [result (try
+                           (sci/call-fn view-f result)
+                           (catch js/Error error
+                             (log/error :custom-view-failed {:error error
+                                                             :result result})
+                             [:div "Custom view failed: "
+                              (str error)]))]
+              (util/hiccup-keywordize result))
+
+            (and (seq result)
+                 (or only-blocks? blocks-grouped-by-page?))
+            (->hiccup result (cond-> (assoc config
+                                            :custom-query? true
+                                            :group-by-page? blocks-grouped-by-page?)
+                               children?
+                               (assoc :ref? true))
+                      {:style {:margin-top "0.25rem"
+                               :margin-left "0.25rem"}})
+
+            (seq result)                     ;TODO: table
+            (let [result (->>
+                          (for [record result]
+                            (if (map? record)
+                              (str (util/pp-str record) "\n")
+                              record))
+                          (remove nil?))]
+              [:pre result])
+
+            :else
+            [:div.text-sm.mt-2.ml-2.font-medium.opacity-50 "Empty"])
+          collapsed?))])))
+
 (defn inline
   [{:keys [html-export?] :as config} item]
   (match item
@@ -629,7 +709,16 @@
                       arguments)]
       (cond
         (= name "query")
-        [:div "TBD"]
+        (when-let [content (first arguments)]
+          (try
+            (let [query (reader/read-string content)]
+              (custom-query (assoc config :dsl-query? true) {:title [:code.p-1 content]
+                                                             :query query}))
+            (catch js/Error e
+              (println "read-string error:")
+              (js/console.error e)
+              [:div.warning {:title "Invalid query"}
+               content])))
 
         (= name "youtube")
         (let [url (first arguments)]
@@ -1508,83 +1597,6 @@
 (defn map-inline
   [config col]
   (map #(inline config %) col))
-
-(declare ->hiccup)
-
-(defn built-in-custom-query?
-  [title]
-  (contains? #{"🔨 NOW" "📅 NEXT"}
-             title))
-
-(rum/defcs custom-query < rum/reactive
-  {:will-mount (fn [state]
-                 (let [[config query] (:rum/args state)
-                       query-atom (db/custom-query query)]
-                   (assoc state :query-atom query-atom)))
-   :did-mount (fn [state]
-                (when-let [query (last (:rum/args state))]
-                  (state/add-custom-query-component! query (:rum/react-component state)))
-                state)
-   :will-unmount (fn [state]
-                   (when-let [query (last (:rum/args state))]
-                     (state/remove-custom-query-component! query)
-                     (db/remove-custom-query! (state/get-current-repo) query))
-                   state)}
-  [state config {:keys [title query inputs view collapsed? children?] :as q}]
-  (let [query-atom (:query-atom state)]
-    (let [current-block-uuid (or (:block/uuid (:block config))
-                                 (:block/uuid config))
-          ;; exclude the current one, otherwise it'll loop forever
-          remove-blocks (if current-block-uuid [current-block-uuid] nil)
-          query-result (and query-atom (rum/react query-atom))
-          result (if query-result
-                   (db/custom-query-result-transform query-result remove-blocks q))
-          view-f (sci/eval-string (pr-str view))
-          only-blocks? (:block/uuid (first result))
-          blocks-grouped-by-page? (and (seq result)
-                                       (coll? (first result))
-                                       (:page/name (ffirst result))
-                                       (:block/uuid (first (second (first result))))
-                                       true)
-          built-in? (built-in-custom-query? title)]
-      [:div.custom-query.mt-2 (get config :attr {})
-       (when-not (and built-in? (empty? result))
-         (ui/foldable
-          [:div.opacity-70
-           title]
-          (cond
-            (and (seq result) view-f)
-            (let [result (try
-                           (sci/call-fn view-f result)
-                           (catch js/Error error
-                             (log/error :custom-view-failed {:error error
-                                                             :result result})
-                             [:div "Custom view failed: "
-                              (str error)]))]
-              (util/hiccup-keywordize result))
-
-            (and (seq result)
-                 (or only-blocks? blocks-grouped-by-page?))
-            (->hiccup result (cond-> (assoc config
-                                            :custom-query? true
-                                            :group-by-page? blocks-grouped-by-page?)
-                               children?
-                               (assoc :ref? true))
-                      {:style {:margin-top "0.25rem"
-                               :margin-left "0.25rem"}})
-
-            (seq result)                     ;TODO: table
-            (let [result (->>
-                          (for [record result]
-                            (if (map? record)
-                              (str (util/pp-str record) "\n")
-                              record))
-                          (remove nil?))]
-              [:pre result])
-
-            :else
-            [:div.text-sm.mt-2.ml-2.font-medium.opacity-50 "Empty"])
-          collapsed?))])))
 
 (defn admonition
   [config type options result]

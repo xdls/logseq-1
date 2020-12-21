@@ -65,8 +65,9 @@
      (custom-query-aux query' query-opts))))
 
 (defn simple-custom-query
-  [query-string]
-  (custom-query-aux query-string {}))
+  [query s]
+  (custom-query-aux {:title s
+                     :query query} {}))
 
 (defn custom-query-result-transform
   [query-result remove-blocks q]
